@@ -41,6 +41,7 @@ class StructMetadata:
     variables: List[Variable] = field(default_factory=list)
     methods: Dict[str, Method] = field(default_factory=dict)
     globals: Dict[str, Variable] = field(default_factory=dict)
+    done = False
 
 @dataclass
 class FunctionMetadata:
@@ -293,8 +294,8 @@ class CodeGenerator:
         logger.info("Starting Code Generation")
         # Step 1: Replace Structs with transformed structs and methods
         self.transformed_code = self.replace_structs()
-        # Step 2: Refactor method calls
-        self.transformed_code = self.refactor_method_calls(self.transformed_code)
+        # Step 2: Refactor method calls with scope-aware replacements
+        self.transformed_code = self.refactor_method_calls_with_scope(self.transformed_code)
         # Step 3: Replace global variable accesses
         self.transformed_code = self.replace_globals(self.transformed_code)
         logger.info("Completed Code Generation")
@@ -306,37 +307,52 @@ class CodeGenerator:
         Removes the original struct definitions from the code.
         """
         logger.info("Replacing structs with transformed structs and methods")
-        transformed_structs = []
-        for struct_name, metadata in self.struct_metadata.items():
-            # Reconstruct the struct without methods and globals
-            struct_body = '\n    '.join([f"{var.type} {var.name};" for var in metadata.variables])
-            transpiled_struct = (
-                f"typedef struct {struct_name}_s {struct_name};\n"
-                f"struct {struct_name}_s {{\n    {struct_body}\n}};\n"
-            )
-            transformed_structs.append(transpiled_struct)
-
-            # Handle globals
-            if metadata.globals:
-                globals_body = '\n    '.join([f"{var.type} {var.name};" for var in metadata.globals.values()])
-                globals_struct = (
-                    f"typedef struct {struct_name}_globals_s {struct_name}_globals_t;\n"
-                    f"struct {struct_name}_globals_s {{\n    {globals_body}\n}};\n"
-                    f"{struct_name}_globals_t {struct_name}_globals;\n"
+        def replace_struct(match: re.Match) -> str:
+            transformed_structs = []
+            full_def = match.group(0)
+            name = match.group(1)
+            body = match.group(2).strip()
+            if name in self.struct_metadata:
+                struct_name = name;
+                metadata = self.struct_metadata[name]
+                if metadata.done == True:
+                    return ''
+                # Reconstruct the struct without methods and globals
+                struct_body = '\n    '.join([f"{var.type} {var.name};" for var in metadata.variables])
+                transpiled_struct = (
+                    f"typedef struct {struct_name}_s {struct_name};\n"
+                    f"struct {struct_name}_s {{\n    {struct_body}\n}};\n"
                 )
-                transformed_structs.append(globals_struct)
+                transformed_structs.append(transpiled_struct)
 
-            # Generate transformed methods
-            for method in metadata.methods.values():
-                transformed_method = self.generate_transformed_method(struct_name, method)
-                transformed_structs.append(transformed_method)
+                # Handle globals
+                if metadata.globals:
+                    globals_body = '\n    '.join([f"{var.type} {var.name};" for var in metadata.globals.values()])
+                    globals_struct = (
+                        f"typedef struct {struct_name}_globals_s {struct_name}_globals_t;\n"
+                        f"struct {struct_name}_globals_s {{\n    {globals_body}\n}};\n"
+                        f"{struct_name}_globals_t {struct_name}_globals;\n"
+                    )
+                    transformed_structs.append(globals_struct)
 
-        # Remove original struct definitions
-        final_code = '\n'.join(transformed_structs) + '\n' 
-        code_without_structs = re.sub(CodeParser.STRUCT_PATTERN, final_code, self.transformed_code)
+                # Generate transformed methods
+                for method in metadata.methods.values():
+                    transformed_method = self.generate_transformed_method(struct_name, method)
+                    transformed_structs.append(transformed_method)
+                metadata.done = True
+                self.struct_metadata[name] = metadata
+            else:
+                logger.error(f"could not find struct {name}")
+
+            # Remove original struct definitions
+            # Here, we assume that the transformed structs should replace the original ones.
+            # For simplicity, we'll prepend the transformed structs to the code.
+            final_code = '\n'.join(transformed_structs) + '\n' 
+            return final_code
+        code_without_structs = re.sub(CodeParser.STRUCT_PATTERN, replace_struct, self.transformed_code)
         # Insert transformed structs at the beginning
         logger.debug("Structs replaced successfully")
-        return code_without_structs 
+        return code_without_structs
 
     def generate_transformed_method(self, struct_name: str, method: Method) -> str:
         """
@@ -356,40 +372,21 @@ class CodeGenerator:
         if method.has_self:
             transformed_function = (
                 f"{method.return_type} {struct_name}_{method.name}({struct_name} *self, {transformed_args}) {{\n"
-                f"    {self.get_method_body(struct_name, method.name)}\n"
+                f"    {method.body}\n"
                 f"}}\n"
             )
         else:
             transformed_function = (
                 f"{method.return_type} {struct_name}_{method.name}({transformed_args}) {{\n"
-                f"    {self.get_method_body(struct_name, method.name)}\n"
+                f"    {method.body}\n"
                 f"}}\n"
             )
         logger.debug(f"Generated transformed method:\n{transformed_function}")
         return transformed_function
 
-    def get_method_body(self, struct_name: str, method_name: str) -> str:
+    def refactor_method_calls_with_scope(self, code: str) -> str:
         """
-        Retrieves the method body from the original function definitions.
-        If not found, returns a placeholder comment.
-        
-        Args:
-            struct_name (str): The name of the struct.
-            method_name (str): The name of the method.
-        
-        Returns:
-            str: The method body.
-        """
-        # Search for the original method in functions_metadata
-        full_method_name = f"{struct_name}_{method_name}"
-        if method_name in self.struct_metadata[struct_name].methods:
-            return self.struct_metadata[struct_name].methods[method_name].body
-        else:
-            return "// Method body here"
-
-    def refactor_method_calls(self, code: str) -> str:
-        """
-        Refactors method calls using the @ syntax to standard C function calls.
+        Refactors method calls using the @ syntax to standard C function calls with scope-aware replacements.
         
         Args:
             code (str): The code to refactor.
@@ -397,113 +394,142 @@ class CodeGenerator:
         Returns:
             str: The refactored code.
         """
-        logger.info("Refactoring method calls")
-        def replace_call(match: re.Match) -> str:
-            full_call = match.group(0)
-            method_call = match.group(1)
-            args = match.group(2).strip()
+        logger.info("Refactoring method calls with scope-aware replacements")
+        
+        # We'll process the code block by block, replacing method calls with scope-aware type resolution
+        # This requires parsing the code to identify scopes and track variable types
 
-            logger.debug(f"Refactoring method call: {full_call}")
+        # Initialize symbol table stack with global scope
+        symbol_table_stack = [self.build_global_symbol_table()]
+        
+        # Split code into lines for processing
+        lines = code.splitlines()
+        transformed_lines = []
+        brace_stack = []  # To track the current scope based on braces
 
-            obj_or_type, method_name = method_call.split('@', 1)
+        for line in lines:
+            stripped_line = line.strip()
+            
+            # Entering a new block
+            if re.search(r'\{', stripped_line):
+                # Push a new symbol table for the new scope
+                symbol_table_stack.append({})
+                brace_stack.append('{')
+            # Exiting a block
+            if re.search(r'\}', stripped_line):
+                if brace_stack:
+                    brace_stack.pop()
+                if symbol_table_stack:
+                    symbol_table_stack.pop()
+                transformed_lines.append(line)
+                continue
 
-            # Determine if obj_or_type is a type (static method) or an instance (instance method)
-            is_type, obj_type, obj_pointer = self.determine_type(obj_or_type)
+            # Handle variable declarations
+            var_decl_match = re.match(CodeParser.DECLARATION_PATTERN, stripped_line)
+            if var_decl_match:
+                variable = parse_variable_declaration(var_decl_match)
+                # Add to the current (top) symbol table
+                symbol_table_stack[-1][variable.name] = variable
+                transformed_lines.append(line)
+                continue
 
-            if not obj_type:
-                error_msg = f"Unable to determine type for '{obj_or_type}' in method call '{full_call}'."
-                logger.error(error_msg)
-                raise TransformationError(error_msg)
+            # Refactor method calls in the current line
+            def replace_call(match: re.Match) -> str:
+                full_call = match.group(0)
+                method_call = match.group(1)
+                args = match.group(2).strip()
 
-            # Retrieve method metadata
-            if obj_type not in self.struct_metadata:
-                error_msg = f"Type '{obj_type}' not found for method '{method_name}' in call '{full_call}'."
-                logger.error(error_msg)
-                raise TransformationError(error_msg)
+                logger.debug(f"Refactoring method call: {full_call}")
 
-            if method_name not in self.struct_metadata[obj_type].methods:
-                error_msg = f"Method '{method_name}' not found in type '{obj_type}' for call '{full_call}'."
-                logger.error(error_msg)
-                raise TransformationError(error_msg)
+                obj_or_type, method_name = method_call.split('@', 1)
 
-            method_meta = self.struct_metadata[obj_type].methods[method_name]
+                # Determine the type of obj_or_type by searching the symbol table stack
+                obj_type, obj_pointer, is_type= self.resolve_type(obj_or_type, symbol_table_stack)
 
-            # Validate arguments
-            expected_args = method_meta.arguments
-            num_expected_args = len(expected_args)
-            provided_args = [arg.strip() for arg in args.split(',')] if args else []
-            num_provided_args = len(provided_args)
-
-            if is_type:
-                # Static method: expect one extra argument (self)
-                if num_provided_args != num_expected_args + 1:
-                    error_msg = (f"Method '{method_name}' of type '{obj_type}' expects "
-                                 f"{num_expected_args} arguments, but {num_provided_args} were provided in '{full_call}'.")
+                if not obj_type:
+                    error_msg = f"Unable to determine type for '{obj_or_type}' in method call '{full_call}'."
                     logger.error(error_msg)
                     raise TransformationError(error_msg)
-            else:
-                # Instance method: arguments as provided
-                if num_provided_args != num_expected_args:
-                    error_msg = (f"Method '{method_name}' of type '{obj_type}' expects "
-                                 f"{num_expected_args} arguments, but {num_provided_args} were provided in '{full_call}'.")
+
+                # Retrieve method metadata
+                if obj_type not in self.struct_metadata:
+                    error_msg = f"Type '{obj_type}' not found for method '{method_name}' in call '{full_call}'."
                     logger.error(error_msg)
                     raise TransformationError(error_msg)
 
-            # Determine transformed function name
-            transformed_function_name = f"{obj_type}_{method_name}"
+                if method_name not in self.struct_metadata[obj_type].methods:
+                    error_msg = f"Method '{method_name}' not found in type '{obj_type}' for call '{full_call}'."
+                    logger.error(error_msg)
+                    raise TransformationError(error_msg)
 
-            # Build transformed arguments
-            if is_type or not method_meta.has_self:
-                transformed_args = args
-            else:
-                if obj_pointer:
-                    transformed_args = obj_or_type
+                method_meta = self.struct_metadata[obj_type].methods[method_name]
+
+                # Determine transformed function name
+                transformed_function_name = f"{obj_type}_{method_name}"
+
+                # Build transformed arguments
+                if method_meta.has_self and not is_type:
+                    if obj_pointer:
+                        transformed_args = obj_or_type
+                    else:
+                        transformed_args = f"&{obj_or_type}"
+                    if args:
+                        transformed_args += f", {args}"
                 else:
-                    transformed_args = f"&{obj_or_type}"
+                    transformed_args = args
 
-                if args:
-                    transformed_args += f", {args}"
+                transformed_args = transformed_args.strip().rstrip(',')
 
-            transformed_args = transformed_args.strip().rstrip(',')
+                transformed_call = f"{transformed_function_name}({transformed_args})"
+                logger.debug(f"Transformed method call: {transformed_call}")
+                return transformed_call
 
-            transformed_call = f"{transformed_function_name}({transformed_args})"
-            logger.debug(f"Transformed method call: {transformed_call}")
-            return transformed_call
+            # Replace all method calls in the current line
+            try:
+                transformed_line = re.sub(self.METHOD_CALL_PATTERN, replace_call, line)
+                transformed_lines.append(transformed_line)
+            except TransformationError as e:
+                logger.error(f"Error transforming line: {line}\n{e}")
+                transformed_lines.append(line)  # Optionally, you can choose to halt or handle differently
 
-        refactored_code = re.sub(self.METHOD_CALL_PATTERN, replace_call, code)
-        logger.info("Method calls refactored successfully")
-        return refactored_code
+        transformed_code = '\n'.join(transformed_lines)
+        logger.info("Method calls refactored successfully with scope awareness")
+        return transformed_code
 
-    def determine_type(self, obj_or_type: str) -> Tuple[bool, Optional[str], bool]:
+    def resolve_type(self, var_name: str, symbol_table_stack: List[Dict[str, Variable]]) -> Tuple[Optional[str], bool, bool]:
         """
-        Determines whether the object is a type (static method) or an instance (instance method).
-        
+        Resolves the type of a variable by searching through the symbol table stack.
+
         Args:
-            obj_or_type (str): The object or type name.
-        
+            var_name (str): The name of the variable.
+            symbol_table_stack (List[Dict[str, Variable]]): The stack of symbol tables representing scopes.
+
         Returns:
-            Tuple[bool, Optional[str], bool]: (is_type, obj_type, obj_pointer)
+            Tuple[Optional[str], bool, bool]: The type of the variable and whether it's a pointer, wether its a type
         """
-        # Check global variables
-        for var in self.hierarchy.global_vars:
-            if var.name == obj_or_type:
-                obj_type = var.type.replace('*', '').strip()
-                obj_pointer = '*' in var.type
-                return False, obj_type, obj_pointer
+        for symbol_table in reversed(symbol_table_stack):
+            if var_name in symbol_table:
+                var = symbol_table[var_name]
+                is_pointer = '*' in var.type
+                var_type = var.type.replace('*', '').strip()
+                logger.debug(f"Resolved type for variable '{var_name}': {var_type}, Pointer: {is_pointer}")
+                return var_type, is_pointer, False
+        # If not found in symbol tables, check if it's a type (static method)
+        if var_name in self.struct_metadata:
+            logger.debug(f"'{var_name}' identified as a type.")
+            return var_name, False, True
+        return None, False, False
 
-        # Check within functions
-        for func in self.hierarchy.functions.values():
-            for var in func.declarations:
-                if var.name == obj_or_type:
-                    obj_type = var.type.replace('*', '').strip()
-                    obj_pointer = '*' in var.type
-                    return False, obj_type, obj_pointer
+    def build_global_symbol_table(self) -> Dict[str, Variable]:
+        """
+        Builds the global symbol table from the global variables.
 
-        # Assume obj_or_type is a type if it exists in struct_metadata or follows naming conventions
-        if obj_or_type in self.struct_metadata or re.match(r'^[A-Z][a-zA-Z0-9_]*$', obj_or_type):
-            return True, obj_or_type, False
-
-        return False, None, False
+        Returns:
+            Dict[str, Variable]: The global symbol table.
+        """
+        global_symbol_table = {var.name: var for var in self.global_variables}
+        logger.debug(f"Global symbol table: {global_symbol_table}")
+        return global_symbol_table
 
     def replace_globals(self, code: str) -> str:
         """
@@ -678,7 +704,6 @@ class HierarchyParser:
 
         return blocks
 
-
 # Entry point for file-based processing
 def main():
     parser = argparse.ArgumentParser(description="Transform C-like code.")
@@ -703,18 +728,22 @@ def main():
     try:
         with open(input_file, "r") as infile:
             input_code = infile.read()
+        with open(input_file, "r") as infile:
+            input_lines = infile.readlines()
 
         transformer = CodeTransformer(input_code)
         transformer.run()
 
         with open(output_file, "w") as outfile:
             outfile.write(transformer.transformed_code)
+            outfile.write(f"\n\n///////////////////////////////////////\n")
+            outfile.write(f"// {input_file} source pre transform\n")
+            outfile.writelines(["// " + line for line in input_lines])
 
         logger.info(f"Transformation completed. Output written to {output_file}")
     except Exception as e:
         logger.error(f"Error during transformation: {e}")
         sys.exit(1)
-
 
 # Example Usage
 if __name__ == "__main__":
