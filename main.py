@@ -23,12 +23,14 @@ class Variable:
     """Represents a variable with its type, name, optional array dimensions, and initial value."""
     type: str
     name: str
+    comments: Optional[str] = None
     array: Optional[str] = None
     value: Optional[str] = None
 
 @dataclass
 class Method:
     """Represents a method within a struct."""
+    comments: str
     return_type: str
     name: str
     arguments: List[Dict[str, Optional[str]]]
@@ -101,8 +103,8 @@ class CodeParser:
     """
     # Regex Patterns
     STRUCT_PATTERN = r"struct\s+(\w+)\s*\{((?:[^{}]*|\{[^{}]*\})*)\};"
-    METHOD_PATTERN = r"(\w+)\s+@(\w+)\s*\(([^)]*)\)\s*\{([\s\S]*?)\};?"
-    GLOBAL_PATTERN = r"(\w+)\s+@(\w+)\s*;"
+    METHOD_PATTERN = r"((?:^[^\r\n]*\/\/.*\r?\n)*\s*)^\s*(\w+)\s+@(\w+)\s*\(([^)]*)\)\s*\{([\s\S]*?)\};"
+    GLOBAL_PATTERN = r"((?:^[^\S\n]*\/\/.*$\r?\n)*)^[^\S\n\r]*(\w+)\s+@(\w+)\s*;"
     FUNCTION_PATTERN = r'\b([a-zA-Z_][a-zA-Z0-9_\s\*]*)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(([^)]*)\)\s*\{([\s\S]*?)\}'
     CONTROL_STRUCTURES = {
         "if", "for", "while", "switch", "else", "do", "case", "default", "goto", "return", "break", "continue"
@@ -136,9 +138,10 @@ class CodeParser:
             self.struct_metadata[struct_name] = metadata
 
             # Extract methods
-            struct_body = re.sub(self.METHOD_PATTERN, lambda m: self.replace_method(m, struct_name, metadata), struct_body)
+            struct_body = re.sub(self.METHOD_PATTERN, lambda m: self.replace_method(m, struct_name, metadata), struct_body,flags=re.MULTILINE )
             # Extract globals
-            struct_body = re.sub(self.GLOBAL_PATTERN, lambda m: self.replace_global(m, struct_name, metadata), struct_body)
+            print(f"struct body is {struct_body}")
+            struct_body = re.sub(self.GLOBAL_PATTERN, lambda m: self.replace_global(m, struct_name, metadata), struct_body,flags=re.MULTILINE)
 
             # Extract variables
             variable_matches = re.finditer(self.DECLARATION_PATTERN, struct_body)
@@ -147,14 +150,17 @@ class CodeParser:
                 metadata.variables.append(variable)
                 logger.debug(f"Extracted variable from struct '{struct_name}': {variable}")
 
+            self.struct_metadata[struct_name] = metadata
+
             logger.info(f"Completed parsing struct: {struct_name}")
 
     def replace_method(self, match: re.Match, struct_name: str, metadata: StructMetadata) -> str:
         """Extracts method details and updates struct metadata."""
-        return_type = match.group(1).strip()
-        method_name = match.group(2).strip()
-        args = match.group(3).strip()
-        body = match.group(4).strip()
+        comments = match.group(1)
+        return_type = match.group(2).strip()
+        method_name = match.group(3).strip()
+        args = match.group(4).strip()
+        body = match.group(5).strip()
 
         logger.debug(f"Extracting method: {method_name} from struct: {struct_name}")
 
@@ -175,6 +181,7 @@ class CodeParser:
             parsed_args.append({"type": arg_type, "name": arg_name})
 
         method = Method(
+            comments=comments,
             return_type=return_type,
             name=method_name,
             arguments=parsed_args,
@@ -189,15 +196,17 @@ class CodeParser:
 
     def replace_global(self, match: re.Match, struct_name: str, metadata: StructMetadata) -> str:
         """Extracts global variable details and updates struct metadata."""
-        var_type = match.group(1).strip()
-        var_name = match.group(2).strip()
+        comments = match.group(1).strip()
+        var_type = match.group(2).strip()
+        var_name = match.group(3).strip()
 
         logger.debug(f"Extracting global variable: {var_name} from struct: {struct_name}")
 
-        variable = Variable(type=var_type, name=var_name)
+        variable = Variable(type=var_type, name=var_name, comments=comments)
         metadata.globals[var_name] = variable
 
         logger.debug(f"Stored global variable metadata for '{var_name}': {variable}")
+        print(f"found comment {comments}")
 
         return ''  # Remove global from struct body
 
@@ -327,7 +336,15 @@ class CodeGenerator:
 
                 # Handle globals
                 if metadata.globals:
-                    globals_body = '\n    '.join([f"{var.type} {var.name};" for var in metadata.globals.values()])
+                    globals_body = ''
+                    for var in metadata.globals.values():
+                        if var.comments is None:
+                            globals_body = globals_body + '\n    ' + f"{var.type} {var.name};"
+                        else:
+                            globals_body = globals_body + f"{var.comments}"
+                            globals_body = globals_body + '\n    ' + f"{var.type} {var.name};"
+
+
                     globals_struct = (
                         f"typedef struct {struct_name}_globals_s {struct_name}_globals_t;\n"
                         f"struct {struct_name}_globals_s {{\n    {globals_body}\n}};\n"
@@ -382,7 +399,8 @@ class CodeGenerator:
                 f"}}\n"
             )
         logger.debug(f"Generated transformed method:\n{transformed_function}")
-        return transformed_function
+
+        return "\n".join([line.strip() for line in method.comments.splitlines()]) + "\n" + transformed_function
 
     def refactor_method_calls_with_scope(self, code: str) -> str:
         """

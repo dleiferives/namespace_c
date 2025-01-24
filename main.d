@@ -16,15 +16,19 @@ struct OtherType{
 
 struct MyType {
     int x;
+    // this is a global comment!
     int @y;
     int @add(MyType *self, int a) {
         self->x += a;
         return self->x;
     };
 
+    // this is a test comment
+    // this is another one!
     int @increment(int value) {
         return value + 1;
     };
+    // this is a second test comment
     int @global_increment(int value) {
         return value + MyType@y;
     };
