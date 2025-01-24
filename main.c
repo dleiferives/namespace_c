@@ -1,3 +1,11 @@
+#include <stdio.h>
+
+int globalVar = 42;
+float globalFloat;
+char *globalString = "Hello, World!";
+const unsigned int globalArray[10] = {0};
+double *globalPointer;
+
 typedef struct MyType_s MyType;
 struct MyType_s {
     int x;
@@ -21,14 +29,6 @@ int MyType_increment(int value) {
 int MyType_global_increment(int value) {
     return value + (MyType_globals.y);
 }
-
-#include <stdio.h>
-
-int globalVar = 42;
-float globalFloat;
-char *globalString = "Hello, World!";
-const unsigned int globalArray[10] = {0};
-double *globalPointer;
 
 
 
