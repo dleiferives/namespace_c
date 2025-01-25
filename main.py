@@ -119,6 +119,8 @@ class CodeParser:
     GLOBAL_VAR_PATTERN = r"\b(const\s+)?(unsigned\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s+(\*\s*)*([a-zA-Z_][a-zA-Z0-9_]*)\s*(\[\s*[a-zA-Z0-9_]*\s*\])?\s*(=\s*[^;]+)?;"
     DECLARATION_PATTERN = r"\b(const\s+)?(unsigned\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s+((?:\*\s*)*)?([a-zA-Z_][a-zA-Z0-9_]*)\s*(\[\s*[a-zA-Z0-9_]*\s*\])?\s*(=\s*[^;]+)?;"
     BLOCK_PATTERN = r"(if|for|while|else)\s*\(.*?\)\s*\{([\s\S]*?)\}"
+    STRUCT_START = 'struct'
+    STRUCT_END_CHAR = '}'
 
     def __init__(self, code: str):
         self.original_code = code
@@ -133,12 +135,35 @@ class CodeParser:
         self.parse_globals()
 
     def parse_structs(self):
+        def extract_structs(code: str) -> List[Tuple[str, str]]:
+            structs = []
+            struct_pattern = re.compile(r'struct\s+(\w+)\s*\{')
+
+            lines = code.split('\n')
+            i = 0
+            while i < len(lines):
+                match = struct_pattern.match(lines[i])
+                if match:
+                    struct_name = match.group(1)
+                    struct_body = []
+                    brace_count = 1
+                    i += 1
+
+                    while i < len(lines) and brace_count > 0:
+                        line = lines[i].strip()
+                        struct_body.append(line)
+                        brace_count += line.count('{') - line.count('}')
+                        i += 1
+
+                    if brace_count == 0:
+                        structs.append((struct_name, '\n'.join(struct_body[:-1])))  # Exclude the closing brace
+                else:
+                    i += 1
+
+            return structs
         """Parses structs, extracting their variables, methods, and global variables."""
         logger.info("Starting Struct Parsing")
-        struct_matches = re.finditer(self.STRUCT_PATTERN, self.original_code)
-        for match in struct_matches:
-            struct_name = match.group(1)
-            struct_body = match.group(2)
+        for struct_name, struct_body in extract_structs(self.original_code):
             logger.debug(f"Processing struct: {struct_name}")
 
             metadata = StructMetadata()
@@ -160,6 +185,7 @@ class CodeParser:
 
             self.struct_metadata[struct_name] = metadata
 
+            logger.info(f"\n\n{struct_name} metadata is {metadata}\n\n\n")
             logger.info(f"Completed parsing struct: {struct_name}")
 
     def replace_method(self, match: re.Match, struct_name: str, metadata: StructMetadata) -> str:
@@ -411,62 +437,122 @@ class CodeGenerator:
         Removes the original struct definitions from the code.
         """
         logger.info("Replacing structs with transformed structs and methods")
-        def replace_struct(match: re.Match) -> str:
-            transformed_structs = []
-            full_def = match.group(0)
-            name = match.group(1)
-            body = match.group(2).strip()
-            if name in self.struct_metadata:
-                struct_name = name;
-                metadata = self.struct_metadata[name]
-                if metadata.done == True:
-                    return ''
-                # Reconstruct the struct without methods and globals
-                struct_body = '\n    '.join([f"{var.keywords}{var.type} {'*' * var.ptr_level}{var.name};" for var in metadata.variables])
-                if len(struct_body.strip()) != 0:
-                    transpiled_struct = (
-                        f"typedef struct {struct_name}_s {struct_name}_t;\n"
-                        f"struct {struct_name}_s {{\n    {struct_body}\n}};\n"
-                    )
-                    transformed_structs.append(transpiled_struct)
+        transformed_structs = []
+        code_lines = self.transformed_code.split('\n')
+        new_code_lines = []
+        i = 0
+        n = len(code_lines)
+        struct_pattern = re.compile(r'struct\s+(\w+)\s*\{')
 
-                # Handle globals
-                if metadata.globals:
-                    globals_body = ''
-                    for var in metadata.globals.values():
-                        if var.comments is None:
-                            globals_body = globals_body + '\n    ' + f"{var.keywords}{var.type} {'*' * var.ptr_level}{var.name};"
-                        else:
-                            globals_body = globals_body + f"{var.comments}"
-                            globals_body = globals_body + '\n    ' + f"{var.keywords}{var.type} {'*' * var.ptr_level}{var.name};"
+        while i < n:
+            line = code_lines[i]
+            stripped_line = line.strip()
 
+            match = struct_pattern.match(line)
+            # Check if the line starts a struct definition
+            if match:
+                # Extract struct name
 
-                    globals_struct = (
-                        f"typedef struct {struct_name}_globals_s {struct_name}_globals_t;\n"
-                        f"struct {struct_name}_globals_s {{\n    {globals_body}\n}};\n"
-                        f"{struct_name}_globals_t {struct_name}_globals;\n"
-                    )
-                    transformed_structs.append(globals_struct)
+                struct_name = match.group(1)
+                logger.debug(f"Found struct: {struct_name} at line {i+1}")
 
-                # Generate transformed methods
-                for method in metadata.methods.values():
-                    transformed_method = self.generate_transformed_method(struct_name, method)
-                    transformed_structs.append(transformed_method)
-                metadata.done = True
-                self.struct_metadata[name] = metadata
+                # Initialize variables to capture the struct body
+                struct_body_lines = []
+                brace_count = 0
+
+                # Check if '{' is on the same line
+                if '{' in line:
+                    brace_count += line.count('{')
+                    brace_count -= line.count('}')
+                    struct_body_lines.append(line[line.find('{') + 1:])
+                else:
+                    # Move to the next line to find '{'
+                    i += 1
+                    if i >= n:
+                        logger.error(f"Struct {struct_name} not properly closed with '{{'")
+                        break
+                    line = code_lines[i]
+                    brace_count += line.count('{')
+                    brace_count -= line.count('}')
+                    struct_body_lines.append(line[line.find('{') + 1:] if '{' in line else line)
+
+                # Continue collecting struct body until all braces are closed
+                while brace_count > 0 and i + 1 < n:
+                    i += 1
+                    line = code_lines[i]
+                    brace_count += line.count('{')
+                    brace_count -= line.count('}')
+                    struct_body_lines.append(line)
+
+                struct_body = '\n'.join(struct_body_lines).strip()
+                logger.debug(f"Captured struct body for {struct_name}")
+
+                # Process the struct if metadata is available
+                if struct_name in self.struct_metadata:
+                    metadata = self.struct_metadata[struct_name]
+                    if metadata.done:
+                        logger.debug(f"Struct {struct_name} already processed. Skipping.")
+                        i += 1
+                        continue
+
+                    # Reconstruct the struct without methods and globals
+                    struct_vars = [
+                        f"{var.keywords} {var.type} {'*' * var.ptr_level}{var.name};"
+                        for var in metadata.variables
+                    ]
+                    struct_body_reconstructed = '\n    '.join(struct_vars)
+
+                    if struct_body_reconstructed.strip():
+                        transpiled_struct = (
+                            f"typedef struct {struct_name}_s {struct_name}_t;\n"
+                            f"struct {struct_name}_s {{\n    {struct_body_reconstructed}\n}};\n"
+                        )
+                        transformed_structs.append(transpiled_struct)
+                        logger.debug(f"Transpiled struct for {struct_name} added.")
+
+                    # Handle globals if any
+                    if metadata.globals:
+                        globals_body = []
+                        for var in metadata.globals.values():
+                            var_declaration = f"    {var.keywords} {var.type} {'*' * var.ptr_level}{var.name};"
+                            if var.comments:
+                                globals_body.append(f"{var.comments}\n{var_declaration}")
+                            else:
+                                globals_body.append(var_declaration)
+                        globals_body_reconstructed = '\n'.join(globals_body)
+                        globals_struct = (
+                            f"typedef struct {struct_name}_globals_s {struct_name}_globals_t;\n"
+                            f"struct {struct_name}_globals_s {{\n{globals_body_reconstructed}\n}};\n"
+                            f"{struct_name}_globals_t {struct_name}_globals;\n"
+                        )
+                        transformed_structs.append(globals_struct)
+                        logger.debug(f"Globals struct for {struct_name} added.")
+
+                    # Generate transformed methods
+                    for method in metadata.methods.values():
+                        transformed_method = self.generate_transformed_method(struct_name, method)
+                        transformed_structs.append(transformed_method)
+                        logger.debug(f"Transformed method for {struct_name}: {method.name} added.")
+
+                    # Mark the struct as processed
+                    metadata.done = True
+                    self.struct_metadata[struct_name] = metadata
+                else:
+                    logger.error(f"Could not find metadata for struct {struct_name}")
+
+                # Append transformed structs instead of the original struct
+                new_code_lines.extend(transformed_structs)
+                transformed_structs = []
             else:
-                logger.error(f"could not find struct {name}")
+                # If not a struct definition, keep the line as is
+                new_code_lines.append(line)
 
-            # Remove original struct definitions
-            # Here, we assume that the transformed structs should replace the original ones.
-            # For simplicity, we'll prepend the transformed structs to the code.
-            final_code = '\n'.join(transformed_structs) + '\n' 
-            return final_code
-        code_without_structs = re.sub(CodeParser.STRUCT_PATTERN, replace_struct, self.transformed_code)
-        # Insert transformed structs at the beginning
+            i += 1
+
+        # Join all lines to form the updated code
+        code_with_updated_structs = '\n'.join(new_code_lines)
         logger.debug("Structs replaced successfully")
-        return code_without_structs
-
+        return code_with_updated_structs
     def generate_transformed_method(self, struct_name: str, method: Method) -> str:
         """
         Generates the standalone function equivalent of a struct method.
