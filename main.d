@@ -6,6 +6,17 @@
 // const unsigned int globalArray[10] = {0};
 // double *globalPointer;
 
+struct Type3{
+    int @g1;
+
+    //
+
+    // smoko
+    int @f1(){
+        return 1;
+    };
+
+};
 struct OtherType{
 	int x;
 	int @increment(int value){
@@ -15,9 +26,11 @@ struct OtherType{
 
 
 struct MyType {
-    int x;
+    int ***x;
     // this is a global comment!
-    int @y;
+    unsigned int @y;
+    int ****@x;
+    MyType *ref;
     int @add(MyType *self, int a) {
         self->x += a;
         return self->x;
@@ -27,6 +40,10 @@ struct MyType {
     // this is another one!
     int @increment(int value) {
         return value + 1;
+    };
+
+    MyType *@get(MyType *self){
+        return self;
     };
     // this is a second test comment
     int @global_increment(int value) {
@@ -51,7 +68,7 @@ void myFunction() {
     MyType a;
     a@increment(10);
     a@add(5);
-    MyType *b;
+    MyType *b = a@get();
     //b@add(MyType@y->a.b);
     b@add(MyType@y);
     MyType@add(b,20);

@@ -23,7 +23,10 @@ class Variable:
     """Represents a variable with its type, name, optional array dimensions, and initial value."""
     type: str
     name: str
+    keywords: str = ""
+    ptr_level: int = 0
     comments: Optional[str] = None
+    rest: Optional[str] = None
     array: Optional[str] = None
     value: Optional[str] = None
 
@@ -36,6 +39,7 @@ class Method:
     arguments: List[Dict[str, Optional[str]]]
     body: str
     has_self: bool
+    ptr_level: int = 0
 
 @dataclass
 class StructMetadata:
@@ -88,12 +92,15 @@ def parse_variable_declaration(declaration: re.Match) -> Variable:
     unsigned = declaration.group(2).strip() if declaration.group(2) else ""
     var_type = declaration.group(3).strip()
     pointer = declaration.group(4).strip() if declaration.group(4) else ""
+    ptr_count = pointer.count("*")
     var_name = declaration.group(5).strip()
     array = declaration.group(6).strip() if declaration.group(6) else ""
     var_value = declaration.group(7).strip() if declaration.group(7) else None
 
-    full_type = " ".join(filter(None, [const, unsigned, var_type, pointer]))
-    return Variable(type=full_type, name=var_name, array=array, value=var_value)
+    keywords = " ".join(filter(None, [const, unsigned]))
+    if len(keywords) != 0:
+        keywords = keywords + " "
+    return Variable(type=var_type, keywords = keywords, name=var_name, array=array, value=var_value,ptr_level = ptr_count)
 
 # Parser Class
 class CodeParser:
@@ -103,14 +110,14 @@ class CodeParser:
     """
     # Regex Patterns
     STRUCT_PATTERN = r"struct\s+(\w+)\s*\{((?:[^{}]*|\{[^{}]*\})*)\};"
-    METHOD_PATTERN = r"((?:^[^\r\n]*\/\/.*\r?\n)*\s*)^\s*(\w+)\s+@(\w+)\s*\(([^)]*)\)\s*\{([\s\S]*?)\};"
-    GLOBAL_PATTERN = r"((?:^[^\S\n]*\/\/.*$\r?\n)*)^[^\S\n\r]*(\w+)\s+@(\w+)\s*;"
+    METHOD_PATTERN = r"((?:^[^\r\n]*\/\/.*\r?\n)*\s*)^\s*(\w+)\s+((?:\*\s*)*)?@(\w+)\s*\(([^)]*)\)\s*\{([\s\S]*?)\};"
+    GLOBAL_PATTERN = r"((?:^[^\S\n]*\/\/.*$\r?\n)*)^[^\S\n\r]*\b(const\s+)?(unsigned\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s+((?:\*\s*)*)?@(\w+)(.*)?\s*;"
     FUNCTION_PATTERN = r'\b([a-zA-Z_][a-zA-Z0-9_\s\*]*)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(([^)]*)\)\s*\{([\s\S]*?)\}'
     CONTROL_STRUCTURES = {
         "if", "for", "while", "switch", "else", "do", "case", "default", "goto", "return", "break", "continue"
     }
     GLOBAL_VAR_PATTERN = r"\b(const\s+)?(unsigned\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s+(\*\s*)*([a-zA-Z_][a-zA-Z0-9_]*)\s*(\[\s*[a-zA-Z0-9_]*\s*\])?\s*(=\s*[^;]+)?;"
-    DECLARATION_PATTERN = r"\b(const\s+)?(unsigned\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s+(\*\s*)*([a-zA-Z_][a-zA-Z0-9_]*)\s*(\[\s*[a-zA-Z0-9_]*\s*\])?\s*(=\s*[^;]+)?;"
+    DECLARATION_PATTERN = r"\b(const\s+)?(unsigned\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s+((?:\*\s*)*)?([a-zA-Z_][a-zA-Z0-9_]*)\s*(\[\s*[a-zA-Z0-9_]*\s*\])?\s*(=\s*[^;]+)?;"
     BLOCK_PATTERN = r"(if|for|while|else)\s*\(.*?\)\s*\{([\s\S]*?)\}"
 
     def __init__(self, code: str):
@@ -142,6 +149,7 @@ class CodeParser:
             # Extract globals
             print(f"struct body is {struct_body}")
             struct_body = re.sub(self.GLOBAL_PATTERN, lambda m: self.replace_global(m, struct_name, metadata), struct_body,flags=re.MULTILINE)
+            print(f"globals struct body is {struct_body}")
 
             # Extract variables
             variable_matches = re.finditer(self.DECLARATION_PATTERN, struct_body)
@@ -158,15 +166,17 @@ class CodeParser:
         """Extracts method details and updates struct metadata."""
         comments = match.group(1)
         return_type = match.group(2).strip()
-        method_name = match.group(3).strip()
-        args = match.group(4).strip()
-        body = match.group(5).strip()
+        pointers_type = match.group(3).strip()
+        ptr_count = pointers_type.count("*")
+        method_name = match.group(4).strip()
+        args = match.group(5).strip()
+        body = match.group(6).strip()
 
         logger.debug(f"Extracting method: {method_name} from struct: {struct_name}")
 
         args_list = [arg.strip() for arg in args.split(',') if arg.strip()]
         has_self = False
-        if args_list and re.match(rf"{struct_name}\s*\*\s*\w+", args_list[0]):
+        if args_list and re.match(rf"{struct_name}(?:_t)?\s*\*\s*\w+", args_list[0]):
             has_self = True
             args_list = args_list[1:]
 
@@ -186,7 +196,8 @@ class CodeParser:
             name=method_name,
             arguments=parsed_args,
             body=body,
-            has_self=has_self
+            has_self=has_self,
+            ptr_level=ptr_count
         )
         metadata.methods[method_name] = method
 
@@ -197,12 +208,20 @@ class CodeParser:
     def replace_global(self, match: re.Match, struct_name: str, metadata: StructMetadata) -> str:
         """Extracts global variable details and updates struct metadata."""
         comments = match.group(1).strip()
-        var_type = match.group(2).strip()
-        var_name = match.group(3).strip()
+        const = match.group(2).strip() if match.group(2) else ""
+        unsigned = match.group(3).strip() if match.group(3) else ""
+        var_type = match.group(4).strip()
+        pointer = match.group(5).strip() if match.group(5) else ""
+        ptr_count = pointer.count("*")
+        var_name = match.group(6).strip()
+        rest = match.group(7).strip() if match.group(7) else ""
 
+        keywords = " ".join(filter(None, [const, unsigned]))
+        if len(keywords) != 0:
+            keywords = keywords + ' '
         logger.debug(f"Extracting global variable: {var_name} from struct: {struct_name}")
 
-        variable = Variable(type=var_type, name=var_name, comments=comments)
+        variable = Variable(type=var_type, name=var_name, keywords=keywords, comments=comments,ptr_level=ptr_count,rest=rest)
         metadata.globals[var_name] = variable
 
         logger.debug(f"Stored global variable metadata for '{var_name}': {variable}")
@@ -283,7 +302,7 @@ class CodeGenerator:
     Utilizes the extracted metadata to generate the transformed code.
     Handles method call refactoring and global variable replacement.
     """
-    METHOD_CALL_PATTERN = r"(\b[a-zA-Z_][a-zA-Z0-9_]*@(?:\w+))\s*\(([^)]*)\)"
+    METHOD_CALL_PATTERN = r"((?:\*)*)?(\b[a-zA-Z_][a-zA-Z0-9_]*@(?:\w+))\s*\(([^)]*)\)"
 
     def __init__(self, 
                  original_code: str, 
@@ -301,14 +320,90 @@ class CodeGenerator:
     def generate(self) -> str:
         """Generates the transformed code by applying all necessary replacements."""
         logger.info("Starting Code Generation")
-        # Step 1: Replace Structs with transformed structs and methods
+        # Step 1: Replace all type usage with well defined _t
+        self.fix_types();
+        # Step 2: Replace Structs with transformed structs and methods
         self.transformed_code = self.replace_structs()
-        # Step 2: Refactor method calls with scope-aware replacements
+        # Step 3: Refactor method calls with scope-aware replacements
         self.transformed_code = self.refactor_method_calls_with_scope(self.transformed_code)
-        # Step 3: Replace global variable accesses
+        # Step 4: Replace global variable accesses
         self.transformed_code = self.replace_globals(self.transformed_code)
+        # Step 5: Replace declarations
+
         logger.info("Completed Code Generation")
         return self.transformed_code
+
+    def fix_types(self):
+
+        def fix_variable(var, name):
+            print(f"checking var {var.type}")
+            if var.type == name:
+                var.type = struct_name + "_t"
+            return var
+
+        def fix_variables(vars: List, name):
+            for iv, var in enumerate(vars):
+                vars[iv] = fix_variable(var,name)
+            return vars
+
+        def fix_argument(arg,name):
+            if 'type' in arg:
+                print(f"checking arg {arg['type']}")
+                if arg['type'] == name:
+                    arg['type'] = name + "_t"
+            return arg
+
+        def fix_arguments(args,name):
+            for ia, arg in enumerate(args):
+                args[ia] = fix_argument(arg,name)
+            return args
+
+
+
+        def fix_method(method,name):
+            print(f"checking method {method.return_type}")
+            if method.return_type == name:
+                method.return_type = name + "_t"
+
+            method.arguments = fix_arguments(method.arguments,name)
+
+            return method
+
+        def fix_methods(methods,name):
+            for method_name, value in methods.items():
+                methods[method_name] = fix_method(value,name)
+            return methods
+
+        def fix_globals(gs,name):
+            print("globals")
+            for g_name, value in gs.items():
+                print(f"global {g_name}")
+                gs[g_name] = fix_variable(value,name)
+            print("end globals")
+            return gs
+
+        def fix_struct(struct_name, new_name):
+            fix_variables(self.struct_metadata[struct_name].variables, new_name)
+
+            # fix methods
+            fix_methods(self.struct_metadata[struct_name].methods,new_name)
+
+            #fix globals
+            fix_globals(self.struct_metadata[struct_name].globals,new_name)
+
+
+        to_fix = []
+        # read through all the structs
+        for struct_name, body in self.struct_metadata.items():
+            to_fix.append(struct_name)
+            for name in to_fix:
+                fix_struct(name, struct_name)
+                fix_struct(struct_name, name)
+
+
+
+        return None
+
 
     def replace_structs(self) -> str:
         """
@@ -327,22 +422,23 @@ class CodeGenerator:
                 if metadata.done == True:
                     return ''
                 # Reconstruct the struct without methods and globals
-                struct_body = '\n    '.join([f"{var.type} {var.name};" for var in metadata.variables])
-                transpiled_struct = (
-                    f"typedef struct {struct_name}_s {struct_name};\n"
-                    f"struct {struct_name}_s {{\n    {struct_body}\n}};\n"
-                )
-                transformed_structs.append(transpiled_struct)
+                struct_body = '\n    '.join([f"{var.keywords}{var.type} {'*' * var.ptr_level}{var.name};" for var in metadata.variables])
+                if len(struct_body.strip()) != 0:
+                    transpiled_struct = (
+                        f"typedef struct {struct_name}_s {struct_name}_t;\n"
+                        f"struct {struct_name}_s {{\n    {struct_body}\n}};\n"
+                    )
+                    transformed_structs.append(transpiled_struct)
 
                 # Handle globals
                 if metadata.globals:
                     globals_body = ''
                     for var in metadata.globals.values():
                         if var.comments is None:
-                            globals_body = globals_body + '\n    ' + f"{var.type} {var.name};"
+                            globals_body = globals_body + '\n    ' + f"{var.keywords}{var.type} {'*' * var.ptr_level}{var.name};"
                         else:
                             globals_body = globals_body + f"{var.comments}"
-                            globals_body = globals_body + '\n    ' + f"{var.type} {var.name};"
+                            globals_body = globals_body + '\n    ' + f"{var.keywords}{var.type} {'*' * var.ptr_level}{var.name};"
 
 
                     globals_struct = (
@@ -388,13 +484,13 @@ class CodeGenerator:
         )
         if method.has_self:
             transformed_function = (
-                f"{method.return_type} {struct_name}_{method.name}({struct_name} *self, {transformed_args}) {{\n"
+                f"{method.return_type} {'*' * method.ptr_level}{struct_name}_{method.name}({struct_name}_t *self, {transformed_args}) {{\n"
                 f"    {method.body}\n"
                 f"}}\n"
             )
         else:
             transformed_function = (
-                f"{method.return_type} {struct_name}_{method.name}({transformed_args}) {{\n"
+                f"{method.return_type} {'*' * method.ptr_level}{struct_name}_{method.name}({transformed_args}) {{\n"
                 f"    {method.body}\n"
                 f"}}\n"
             )
@@ -442,27 +538,20 @@ class CodeGenerator:
                 transformed_lines.append(line)
                 continue
 
-            # Handle variable declarations
-            var_decl_match = re.match(CodeParser.DECLARATION_PATTERN, stripped_line)
-            if var_decl_match:
-                variable = parse_variable_declaration(var_decl_match)
-                # Add to the current (top) symbol table
-                symbol_table_stack[-1][variable.name] = variable
-                transformed_lines.append(line)
-                continue
-
             # Refactor method calls in the current line
             def replace_call(match: re.Match) -> str:
                 full_call = match.group(0)
-                method_call = match.group(1)
-                args = match.group(2).strip()
+                ptr = match.group(1)
+                ptr_count = ptr.count("*")
+                method_call = match.group(2)
+                args = match.group(3).strip()
 
                 logger.debug(f"Refactoring method call: {full_call}")
 
                 obj_or_type, method_name = method_call.split('@', 1)
 
                 # Determine the type of obj_or_type by searching the symbol table stack
-                obj_type, obj_pointer, is_type= self.resolve_type(obj_or_type, symbol_table_stack)
+                obj_type, ptr_level, is_type= self.resolve_type(obj_or_type, symbol_table_stack)
 
                 if not obj_type:
                     error_msg = f"Unable to determine type for '{obj_or_type}' in method call '{full_call}'."
@@ -487,10 +576,12 @@ class CodeGenerator:
 
                 # Build transformed arguments
                 if method_meta.has_self and not is_type:
-                    if obj_pointer:
-                        transformed_args = obj_or_type
-                    else:
+                    ptr_level = ptr_count + ptr_level - 1
+                    if(ptr_level < 0):
                         transformed_args = f"&{obj_or_type}"
+                    else:
+                        transformed_args = f"{'*' * ptr_level}{obj_or_type}"
+
                     if args:
                         transformed_args += f", {args}"
                 else:
@@ -501,6 +592,29 @@ class CodeGenerator:
                 transformed_call = f"{transformed_function_name}({transformed_args})"
                 logger.debug(f"Transformed method call: {transformed_call}")
                 return transformed_call
+
+
+            # Handle variable declarations
+            var_decl_match = re.match(CodeParser.DECLARATION_PATTERN, stripped_line)
+            if var_decl_match:
+                variable = parse_variable_declaration(var_decl_match)
+                # Add to the current (top) symbol table
+                symbol_table_stack[-1][variable.name] = variable
+                new_line = []
+                def update_declaration(match):
+                    new_line.append(line[:match.end(3)] + "_t" + line[match.end(3):])
+
+                if variable.type in self.struct_metadata:
+                    re.sub(CodeParser.DECLARATION_PATTERN, update_declaration, line)
+                    # Replace all method calls in the current line
+                    try:
+                        transformed_line = re.sub(self.METHOD_CALL_PATTERN, replace_call, new_line[0])
+                        print(f"transformed line {transformed_line}")
+                        transformed_lines.append(transformed_line)
+                    except TransformationError as e:
+                        logger.error(f"Error transforming line: {line}\n{e}")
+                        transformed_lines.append(line)  # Optionally, you can choose to halt or handle differently
+                    continue
 
             # Replace all method calls in the current line
             try:
@@ -523,20 +637,19 @@ class CodeGenerator:
             symbol_table_stack (List[Dict[str, Variable]]): The stack of symbol tables representing scopes.
 
         Returns:
-            Tuple[Optional[str], bool, bool]: The type of the variable and whether it's a pointer, wether its a type
+            Tuple[Optional[str], bool, bool]: The type of the variable depth of its pointer, wether its a type
         """
         for symbol_table in reversed(symbol_table_stack):
             if var_name in symbol_table:
                 var = symbol_table[var_name]
-                is_pointer = '*' in var.type
                 var_type = var.type.replace('*', '').strip()
-                logger.debug(f"Resolved type for variable '{var_name}': {var_type}, Pointer: {is_pointer}")
-                return var_type, is_pointer, False
+                logger.debug(f"Resolved type for variable '{var_name}': {var_type}, Pointer: {var.ptr_level}")
+                return var_type, var.ptr_level, False
         # If not found in symbol tables, check if it's a type (static method)
         if var_name in self.struct_metadata:
             logger.debug(f"'{var_name}' identified as a type.")
-            return var_name, False, True
-        return None, False, False
+            return var_name, 0, True
+        return None, 0, False
 
     def build_global_symbol_table(self) -> Dict[str, Variable]:
         """
@@ -562,11 +675,14 @@ class CodeGenerator:
         logger.info("Replacing global variable accesses")
         updated_code = code
         for struct_name, metadata in self.struct_metadata.items():
+            print(f"cheecking {struct_name}")
+            print(f"metadata {metadata}")
             for global_member in metadata.globals.keys():
+                print(f"member is {global_member}")
                 pattern = rf'\b{struct_name}@{global_member}\b'
                 replacement = f"({struct_name}_globals.{global_member})"
                 updated_code = re.sub(pattern, replacement, updated_code)
-                logger.debug(f"Replaced '{struct_name}@{global_member}' with '{replacement}'")
+                print(f"Replaced '{struct_name}@{global_member}' with '{replacement}'")
         logger.info("Global variable accesses replaced successfully")
         return updated_code
 
