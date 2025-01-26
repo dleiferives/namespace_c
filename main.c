@@ -6,7 +6,20 @@
 // const unsigned int globalArray[10] = {0};
 // double *globalPointer;
 
-typedef struct OtherType_s OtherType;
+typedef struct Type3_globals_s Type3_globals_t;
+struct Type3_globals_s {
+    
+    int g1;
+};
+Type3_globals_t Type3_globals;
+
+// smoko
+int Type3_f1() {
+    return 1;
+}
+
+
+typedef struct OtherType_s OtherType_t;
 struct OtherType_s {
     int x;
 };
@@ -19,20 +32,22 @@ int OtherType_increment(int value) {
 
 
 
-typedef struct MyType_s MyType;
+typedef struct MyType_s MyType_t;
 struct MyType_s {
-    int x;
+    int ***x;
+    MyType_t *ref;
 };
 
 typedef struct MyType_globals_s MyType_globals_t;
 struct MyType_globals_s {
     // this is a global comment!
-    int y;
+    unsigned int y;
+    int ****x;
 };
 MyType_globals_t MyType_globals;
 
 
-int MyType_add(MyType *self, int a) {
+int MyType_add(MyType_t *self, int a) {
     self->x += a;
         return self->x;
 }
@@ -41,6 +56,12 @@ int MyType_add(MyType *self, int a) {
 // this is another one!
 int MyType_increment(int value) {
     return value + 1;
+}
+
+
+
+MyType_t *MyType_get(MyType_t *self, ) {
+    return self;
 }
 
 // this is a second test comment
@@ -64,24 +85,24 @@ void myFunction() {
             int nestedForVar = 50;
         }
     }
-    MyType a;
+    MyType_t a;
     MyType_increment(10);
     MyType_add(&a, 5);
-    MyType *b;
+    MyType_t *b = MyType_get(&a);
     //MyType_add(b, (MyType_globals.y)->a.b);
     MyType_add(b, (MyType_globals.y));
     MyType_add(b,20);
 }
 
 int add(int d, int b) {
-    OtherType *a;
+    OtherType_t *a;
     OtherType_increment(20);
     int sum = d + b;
     return sum;
 }
 
 int main(){
-    OtherType a;
+    OtherType_t a;
     OtherType_increment(10);
     return 0;
 }
@@ -96,6 +117,17 @@ int main(){
 // // const unsigned int globalArray[10] = {0};
 // // double *globalPointer;
 // 
+// struct Type3{
+//     int @g1;
+// 
+//     //
+// 
+//     // smoko
+//     int @f1(){
+//         return 1;
+//     };
+// 
+// };
 // struct OtherType{
 // 	int x;
 // 	int @increment(int value){
@@ -105,9 +137,11 @@ int main(){
 // 
 // 
 // struct MyType {
-//     int x;
+//     int ***x;
 //     // this is a global comment!
-//     int @y;
+//     unsigned int @y;
+//     int ****@x;
+//     MyType *ref;
 //     int @add(MyType *self, int a) {
 //         self->x += a;
 //         return self->x;
@@ -117,6 +151,10 @@ int main(){
 //     // this is another one!
 //     int @increment(int value) {
 //         return value + 1;
+//     };
+// 
+//     MyType *@get(MyType *self){
+//         return self;
 //     };
 //     // this is a second test comment
 //     int @global_increment(int value) {
@@ -141,7 +179,7 @@ int main(){
 //     MyType a;
 //     a@increment(10);
 //     a@add(5);
-//     MyType *b;
+//     MyType *b = a@get();
 //     //b@add(MyType@y->a.b);
 //     b@add(MyType@y);
 //     MyType@add(b,20);

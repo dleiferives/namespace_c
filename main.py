@@ -202,7 +202,7 @@ class CodeParser:
 
         args_list = [arg.strip() for arg in args.split(',') if arg.strip()]
         has_self = False
-        if args_list and re.match(rf"{struct_name}(?:_t)?\s*\*\s*\w+", args_list[0]):
+        if args_list and re.match(rf"{struct_name}(?:_t)?\s+\*\s*self", args_list[0]):
             has_self = True
             args_list = args_list[1:]
 
@@ -335,26 +335,49 @@ class CodeGenerator:
                  struct_metadata: Dict[str, StructMetadata], 
                  functions_metadata: Dict[str, FunctionMetadata], 
                  global_variables: List[Variable],
-                 hierarchy: Hierarchy):
+                 hierarchy: Hierarchy,
+                 declare_in_place = False):
         self.original_code = original_code
         self.struct_metadata = struct_metadata
         self.functions_metadata = functions_metadata
         self.global_variables = global_variables
         self.hierarchy = hierarchy
         self.transformed_code = original_code  # Initialize with original code
+        self.declare_in_place = declare_in_place
+        self.pre_declarations = []
 
     def generate(self) -> str:
         """Generates the transformed code by applying all necessary replacements."""
         logger.info("Starting Code Generation")
-        # Step 1: Replace all type usage with well defined _t
+        # Step 1: Replace all type usage with well defined _t precode
+        logger.info("Fixing Types")
         self.fix_types();
         # Step 2: Replace Structs with transformed structs and methods
+        logger.info("Replacing Structs")
         self.transformed_code = self.replace_structs()
         # Step 3: Refactor method calls with scope-aware replacements
+        logger.info("Refactoring calls")
         self.transformed_code = self.refactor_method_calls_with_scope(self.transformed_code)
-        # Step 4: Replace global variable accesses
+        # Step 4: Replace simple transforms
+        logger.info("Simple replacements")
         self.transformed_code = self.replace_globals(self.transformed_code)
-        # Step 5: Replace declarations
+        self.transformed_code = self.replace_typecasts(self.transformed_code)
+        self.transformed_code = self.replace_function_pointer(self.transformed_code)
+
+        ## TODO @(dleiferives,7bbd9fd5-1b00-4f1c-bd20-48f312ec72ac): good place
+        ## for header generation refactor ~#
+        # Step 5: Generate declarations if need
+        # typedefs
+        # function pointers
+        # normal structs
+        # global structs
+        # globals default assignment/ declaration
+        #
+        # member functions
+        # everything else
+        if not self.declare_in_place:
+            logger.info("Inserting Declarations")
+            self.transformed_code = "".join(self.pre_declarations) + self.transformed_code
 
         logger.info("Completed Code Generation")
         return self.transformed_code
@@ -503,11 +526,21 @@ class CodeGenerator:
                     struct_body_reconstructed = '\n    '.join(struct_vars)
 
                     if struct_body_reconstructed.strip():
-                        transpiled_struct = (
-                            f"typedef struct {struct_name}_s {struct_name}_t;\n"
-                            f"struct {struct_name}_s {{\n    {struct_body_reconstructed}\n}};\n"
-                        )
-                        transformed_structs.append(transpiled_struct)
+                        if not self.declare_in_place:
+                            transpiled_struct = (
+                                f"struct {struct_name}_s {{\n    {struct_body_reconstructed}\n}};\n"
+                            )
+                            transformed_structs.append(transpiled_struct)
+                            transpiled_struct = (
+                                f"typedef struct {struct_name}_s {struct_name}_t;\n"
+                            )
+                            self.pre_declarations.append(transpiled_struct)
+                        else:
+                            transpiled_struct = (
+                                f"typedef struct {struct_name}_s {struct_name}_t;\n"
+                                f"struct {struct_name}_s {{\n    {struct_body_reconstructed}\n}};\n"
+                            )
+                            transformed_structs.append(transpiled_struct)
                         logger.debug(f"Transpiled struct for {struct_name} added.")
 
                     # Handle globals if any
@@ -520,12 +553,23 @@ class CodeGenerator:
                             else:
                                 globals_body.append(var_declaration)
                         globals_body_reconstructed = '\n'.join(globals_body)
-                        globals_struct = (
-                            f"typedef struct {struct_name}_globals_s {struct_name}_globals_t;\n"
-                            f"struct {struct_name}_globals_s {{\n{globals_body_reconstructed}\n}};\n"
-                            f"{struct_name}_globals_t {struct_name}_globals;\n"
-                        )
-                        transformed_structs.append(globals_struct)
+                        if not self.declare_in_place:
+                            globals_struct = (
+                                f"struct {struct_name}_globals_s {{\n{globals_body_reconstructed}\n}};\n"
+                                f"{struct_name}_globals_t {struct_name}_globals;\n"
+                            )
+                            transformed_structs.append(globals_struct)
+                            globals_struct = (
+                                f"typedef struct {struct_name}_globals_s {struct_name}_globals_t;\n"
+                            )
+                            self.pre_declarations.append(globals_struct)
+                        else:
+                            globals_struct = (
+                                f"typedef struct {struct_name}_globals_s {struct_name}_globals_t;\n"
+                                f"struct {struct_name}_globals_s {{\n{globals_body_reconstructed}\n}};\n"
+                                f"{struct_name}_globals_t {struct_name}_globals;\n"
+                            )
+                            transformed_structs.append(globals_struct)
                         logger.debug(f"Globals struct for {struct_name} added.")
 
                     # Generate transformed methods
@@ -553,6 +597,7 @@ class CodeGenerator:
         code_with_updated_structs = '\n'.join(new_code_lines)
         logger.debug("Structs replaced successfully")
         return code_with_updated_structs
+
     def generate_transformed_method(self, struct_name: str, method: Method) -> str:
         """
         Generates the standalone function equivalent of a struct method.
@@ -564,17 +609,26 @@ class CodeGenerator:
         Returns:
             str: The transformed method as a standalone function.
         """
+        arg_string = ', ' if len(method.arguments) >= 1 else ''
         transformed_args = ', '.join(
             f"{arg['type']} {arg['name']}" if arg['type'] else arg['name']
             for arg in method.arguments
         )
         if method.has_self:
+            if not self.declare_in_place:
+                transformed_function = (
+                    f"{method.return_type} {'*' * method.ptr_level}{struct_name}_{method.name}({struct_name}_t *self{arg_string}{transformed_args});\n")
+                self.pre_declarations.append(transformed_function)
             transformed_function = (
-                f"{method.return_type} {'*' * method.ptr_level}{struct_name}_{method.name}({struct_name}_t *self, {transformed_args}) {{\n"
+                f"{method.return_type} {'*' * method.ptr_level}{struct_name}_{method.name}({struct_name}_t *self{arg_string}{transformed_args}) {{\n"
                 f"    {method.body}\n"
                 f"}}\n"
             )
         else:
+            if not self.declare_in_place:
+                transformed_function = (
+                    f"{method.return_type} {'*' * method.ptr_level}{struct_name}_{method.name}({transformed_args});\n")
+                self.pre_declarations.append(transformed_function)
             transformed_function = (
                 f"{method.return_type} {'*' * method.ptr_level}{struct_name}_{method.name}({transformed_args}) {{\n"
                 f"    {method.body}\n"
@@ -761,15 +815,60 @@ class CodeGenerator:
         logger.info("Replacing global variable accesses")
         updated_code = code
         for struct_name, metadata in self.struct_metadata.items():
-            print(f"cheecking {struct_name}")
-            print(f"metadata {metadata}")
+            logger.info(f"checking {struct_name}");
+            logger.debug(f"{struct_name} metadata is {metadata}");
             for global_member in metadata.globals.keys():
-                print(f"member is {global_member}")
+                logger.debug(f"member is {global_member}")
                 pattern = rf'\b{struct_name}@{global_member}\b'
                 replacement = f"({struct_name}_globals.{global_member})"
                 updated_code = re.sub(pattern, replacement, updated_code)
-                print(f"Replaced '{struct_name}@{global_member}' with '{replacement}'")
+                logger.debug(f"Replaced '{struct_name}@{global_member}' with '{replacement}'")
         logger.info("Global variable accesses replaced successfully")
+        return updated_code
+
+    def replace_typecasts(self, code: str) -> str:
+        """
+        Replaces occurrences of \(\s*StructType\s*((?:\*\s*)*)?\) with \(\s*StructType_t\s*((?:\*\s*)*)?\).
+
+        Args:
+            code (str): The code to process.
+
+        Returns:
+            str: The updated code with typecasts replaced.
+        """
+        logger.info("Replacing typecasts")
+        updated_code = code
+        for struct_name, metadata in self.struct_metadata.items():
+            logger.info(f"checking {struct_name}");
+            pattern = rf'\(\s*{struct_name}\s*((?:\*\s*)*)\)'
+            replacement = rf'({struct_name}_t\1)'
+            updated_code = re.sub(pattern, replacement, updated_code)
+            logger.debug(f"Replaced typecasts for {struct_name}")
+        logger.info("Typecasts replaced successfully")
+        return updated_code
+
+    def replace_function_pointer(self, code: str) -> str:
+        """
+        Replaces occurrences of StructType@method_name with  StructType_method_name
+
+        Args:
+            code (str): The code to process.
+
+        Returns:
+            str: The updated code with typecasts replaced.
+        """
+        logger.info("Replacing function pointers")
+        updated_code = code
+        for struct_name, metadata in self.struct_metadata.items():
+            logger.info(f"checking {struct_name}");
+            logger.debug(f"{struct_name} metadata is {metadata}");
+            for method_name in metadata.methods.keys():
+                logger.debug(f"found method {method_name}")
+                pattern = rf'\b{struct_name}@{method_name}\b'
+                replacement = f"({struct_name}_{method_name})"
+                updated_code = re.sub(pattern, replacement, updated_code)
+                logger.debug(f"Replaced '{struct_name}@{method_name}' with '{replacement}'")
+        logger.info("Function pointer replacement completed")
         return updated_code
 
 # Main Transformer Pipeline
@@ -777,9 +876,10 @@ class CodeTransformer:
     """
     Orchestrates the entire code transformation process by utilizing the CodeParser and CodeGenerator.
     """
-    def __init__(self, code: str):
+    def __init__(self, code: str,declare_in_place=False):
         self.original_code = code
         self.transformed_code = code
+        self.declare_in_place = declare_in_place
         self.struct_metadata: Dict[str, StructMetadata] = {}
         self.functions_metadata: Dict[str, FunctionMetadata] = {}
         self.global_variables: List[Variable] = []
@@ -808,7 +908,8 @@ class CodeTransformer:
             struct_metadata=self.struct_metadata,
             functions_metadata=self.functions_metadata,
             global_variables=self.global_variables,
-            hierarchy=self.hierarchy
+            hierarchy=self.hierarchy,
+            declare_in_place=self.declare_in_place
         )
         self.transformed_code = generator.generate()
 
@@ -928,6 +1029,7 @@ class HierarchyParser:
 def main():
     parser = argparse.ArgumentParser(description="Transform C-like code.")
     parser.add_argument("input_file", help="Path to the input file")
+    parser.add_argument("-dip", "--declare_in_place", help="Do declarations in place", default=False)
     parser.add_argument("-o", "--output_file", help="Path to the output file (optional)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
     args = parser.parse_args()
@@ -951,13 +1053,13 @@ def main():
         with open(input_file, "r") as infile:
             input_lines = infile.readlines()
 
-        transformer = CodeTransformer(input_code)
+        transformer = CodeTransformer(input_code,declare_in_place=args.declare_in_place)
         transformer.run()
 
         with open(output_file, "w") as outfile:
             outfile.write(transformer.transformed_code)
             outfile.write(f"\n\n///////////////////////////////////////\n")
-            outfile.write(f"// {input_file} source pre transform\n")
+            outfile.write(f"// {output_file} autogenerated from {input_file}: \n")
             outfile.writelines(["// " + line for line in input_lines])
 
         logger.info(f"Transformation completed. Output written to {output_file}")

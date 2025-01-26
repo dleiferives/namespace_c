@@ -72,6 +72,7 @@ void myFunction() {
     //b@add(MyType@y->a.b);
     b@add(MyType@y);
     MyType@add(b,20);
+    int d = (MyType **) 2000;
 }
 
 int add(int d, int b) {
